@@ -1,16 +1,18 @@
 from airflow import DAG
-from airflow.operators.python_operator import PythonOperator
+from airflow.operators.python import PythonOperator
 from datetime import datetime, timedelta
 import tmdbsimple as tmdb
 import json
 import vertica_python
 
 TMDB_API_KEY = '3098581a010a1964a2a57c115c3eb5a2'
+movie_data = []
 
 VERTICA_CONN_INFO = {
     'host': 'abdallaalhalami-vertica.coder.svc',
     'port': 5433,
     'user': 'dbadmin',
+    'autocommit': True
     # 'password': '',
     # 'database': '',
 }
@@ -21,8 +23,8 @@ default_args = {
     'start_date': datetime(2024, 11, 4),
     # 'email_on_failure': False,
     # 'email_on_retry': False,
-    'retries': 1,
-    'retry_delay': timedelta(minutes=5),
+    # 'retries': 1,
+    # 'retry_delay': timedelta(minutes=5),
 }
 
 dag = DAG(
@@ -37,8 +39,12 @@ tmdb.API_KEY = TMDB_API_KEY
 
 
 # Function to scrape the top 1000 movies from TMDB
-def scrape_top_movies():
-    movie_data = []
+def scrape_top_movies(**context):
+    execution_date = context['ds']
+    formatted_date = datetime.strptime(execution_date, '%Y-%m-%d').strftime('%d-%m-%Y')
+    output_filename = f"/tmp/Top1000-{formatted_date}.json"
+
+    global movie_data
     total_movies = 1000
     movies_per_page = 20
     total_pages = total_movies // movies_per_page
@@ -48,27 +54,13 @@ def scrape_top_movies():
         movie_data.extend(movies['results'])
 
     # Save the movie data to a JSON file for processing in the next step
-    with open('/Users/AbdAhmed3/Library/CloudStorage/OneDrive-MAJIDALFUTTAIMPROPERTIESLLC/Desktop/GitHub/ETL-Movies/Top1000.json', 'w') as f:
+    with open(output_filename, 'w') as f:
         json.dump(movie_data, f)
 
 
 def transform_and_load_data():
-    with open('/path/to/save/top_1000_movies.json', 'r') as f:
-        movie_data = json.load(f)
-
-    # Clean and transform the data
-    cleaned_data = []
-    for movie in movie_data:
-        cleaned_movie = {
-            'id': movie.get('id'),
-            'title': movie.get('title'),
-            'release_date': movie.get('release_date'),
-            'vote_average': movie.get('vote_average'),
-            'vote_count': movie.get('vote_count'),
-            'popularity': movie.get('popularity'),
-            'overview': movie.get('overview'),
-        }
-        cleaned_data.append(cleaned_movie)
+    # with open(output_filename, 'r') as f:
+    #     movie_data = json.load(f)
 
     with vertica_python.connect(**VERTICA_CONN_INFO) as connection:
         cursor = connection.cursor()
@@ -76,26 +68,25 @@ def transform_and_load_data():
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS movies (
                 id INTEGER PRIMARY KEY,
-                title VARCHAR,
+                title VARCHAR(1000),
                 release_date DATE,
                 vote_average FLOAT,
                 vote_count INTEGER,
                 popularity FLOAT,
-                overview VARCHAR
+                overview VARCHAR(2000)
             );
         ''')
 
         insert_query = '''
             INSERT INTO movies (id, title, release_date, vote_average, vote_count, popularity, overview)
             VALUES (%s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (id) DO NOTHING;
+            -- ON CONFLICT (id) DO NOTHING;
         '''
-
-        for movie in cleaned_data:
+        for movie in movie_data:
             cursor.execute(insert_query, (
                 movie['id'],
                 movie['title'],
-                movie['release_date'],
+                None if not movie['release_date'] else movie['release_date'],
                 movie['vote_average'],
                 movie['vote_count'],
                 movie['popularity'],
@@ -117,3 +108,7 @@ transform_and_load_task = PythonOperator(
 
 # task dependencies for AirFlow , comment if python vvv
 scrape_movies_task >> transform_and_load_task
+
+if __name__ == "__main__" :
+    scrape_top_movies()
+    transform_and_load_data()
